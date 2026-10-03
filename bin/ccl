@@ -106,6 +106,19 @@ for m in models:
             verify_picker
             exit $?
             ;;
+        --compact)
+            # Which engine handles auto-compact (heavy summarization). Offloads it off the local
+            # model. Values: opencode (GLM, default) · gemini · codex · local · off.
+            CF="$CLAUDE_HOME/compact-engine"
+            if [ -n "${2:-}" ]; then
+                echo "$2" > "$CF"; echo "✓ auto-compact engine: $2"
+            else
+                CUR=$(cat "$CF" 2>/dev/null || true)
+                echo "auto-compact engine: ${CUR:-opencode (default)}"
+                echo "  set with: ccl --compact {opencode|gemini|codex|local|off}"
+            fi
+            exit 0
+            ;;
         --fix-ctx)
             # Models with a context too small for Claude Code's opening prompt → -ctx128k variants
             exec python3 "$PROJECT_ROOT/scripts/tune.py" --fix-ctx

@@ -48,6 +48,11 @@ finite unified memory. That's the whole point of `ccl`.
    turn is slow — the cheapest knob to speed it up. `ccl --tune` is an LM-Studio-style panel that
    persists those knobs where they actually take effect (see [Architecture](docs/ARCHITECTURE.md)).
 
+4. **Auto-compact offload.** Summarizing a whole conversation on a 35B local model takes 15–20 min
+   and freezes the session. ccl hands Claude Code's auto-compact request to a fast external engine
+   (opencode/GLM by default; `ccl --compact` to change, `local`/`off` to keep it on the local model),
+   falling back to the local model on any failure. Your local models stay free for real work.
+
 Plus: measured tok/s and first-token time shown in the `/model` list, one-command model import from
 LM Studio / Hugging Face, and automatic sync into [opencode](https://github.com/sst/opencode).
 
@@ -76,6 +81,7 @@ ccl                                    # first run syncs your Ollama models into
 | `ccl --list` | Show local models + what's loaded in RAM/VRAM |
 | `ccl --tune [model]` | LM-Studio-style panel: context, GPU offload, threads, Flash Attention, KV-cache type |
 | `ccl --fix-ctx` | Make `-ctx128k` variants of models whose context is too small for Claude Code |
+| `ccl --compact [engine]` | Which engine does auto-compact: `opencode` (default) / `gemini` / `codex` / `local` / `off` |
 | `ccl --unload` | Evict all models from memory now |
 | `ccl --update` | Update Claude Code, then verify the `/model` picker still lists local models |
 | `ccl --doctor` | Just run that verification |
