@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.log
+*.pid
+.DS_Store
+# generated at runtime by sync-models.py (machine-specific paths)
+config/settings.json
+tmp/

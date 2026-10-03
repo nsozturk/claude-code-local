@@ -1,0 +1,623 @@
+#!/usr/bin/env python3
+"""
+Claude-to-Ollama Anthropic Messages API Bridge
+---------------------------------------------
+Lightweight, zero-dependency Python bridge that allows Claude Code CLI (ccl)
+to communicate seamlessly with local Ollama models (such as isvalorum-35b).
+
+Features:
+- Listens on 127.0.0.1:11435 and bridges to Ollama (127.0.0.1:11434).
+- Answers Claude Code health checks (HEAD/GET /api/hello, /health).
+- Maps Anthropic model identifiers to local Ollama models.
+- Dynamic model unloading: when switching models (via /model in Claude Code),
+  automatically unloads the previous model from RAM/VRAM via Ollama keep_alive: 0.
+- Serves /api/unload to manually purge all loaded models from memory.
+- Provides Anthropic- and OpenAI-compatible /v1/models endpoint from Ollama tags.
+- Fixes Ollama Jinja template constraint by converting non-first system messages to user messages.
+- Streams SSE tokens in real-time with zero buffering and handles client disconnects gracefully.
+- Provides start/stop/status/restart/unload daemon CLI commands.
+"""
+
+import http.server
+import json
+import os
+import re
+import signal
+import socket
+import socketserver
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "scripts"))
+import ollama_mem  # noqa: E402  (shared with ccl --tune)
+
+PORT = int(os.environ.get("BRIDGE_PORT", 11435))
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+DEFAULT_LOCAL_MODEL = os.environ.get("DEFAULT_LOCAL_MODEL", "isvalorum-35b:latest")
+RUN_DIR = os.path.expanduser("~/.claude-isvalorum")
+PID_FILE = os.path.join(RUN_DIR, "bridge.pid")
+LOG_FILE = os.path.join(RUN_DIR, "bridge.log")
+HOP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "content-length", "date", "server"}
+LAST_MODEL = None  # last model explicitly requested by Claude Code (/model pick)
+SWITCH_LOCK = threading.Lock()  # serializes /model preloads so rapid picks never leave two models resident
+STATS_FILE = os.path.join(RUN_DIR, "stats.jsonl")
+# Last model each Claude Code session reported via its status line. Only a *change* within one
+# session is a /model pick; several open ccl sessions must not evict each other every second.
+SESSION_MODELS = {}
+# What the bridge is doing for STATUS["model"]. The phase is derived from counters, because Claude
+# Code runs a short title request next to the main turn and the last event alone would mislead.
+STATUS = {"model": None, "loading": False, "inflight": 0, "waiting": 0}
+SHOWN = {}  # model -> (phase, since): per model, since every open session polls its own model
+STATUS_LOCK = threading.Lock()
+
+def track(model, loading=None, inflight=0, waiting=0):
+    """loading: a load was started (True) or finished (False); inflight/waiting: +1/-1 per request
+    (waiting = still before its first token)."""
+    with STATUS_LOCK:
+        b = ollama_mem.base(model)
+        if b != STATUS["model"]:
+            STATUS.update(model=b, loading=False, inflight=0, waiting=0)
+        if loading is not None:
+            STATUS["loading"] = loading
+        STATUS["inflight"] = max(0, STATUS["inflight"] + inflight)
+        STATUS["waiting"] = max(0, STATUS["waiting"] + waiting)
+
+def status_for(model):
+    """Live view for the status line: load %, prefill/generating, expiry, memory fit."""
+    b = ollama_mem.base(model)
+    try:
+        resident = {ollama_mem.base(m["name"]): m for m in ollama_mem.loaded()}
+    except Exception:
+        return {"model": b, "phase": "offline"}
+    m = resident.get(b)
+    mine = STATUS["model"] == b
+    if mine and STATUS["loading"] and not m:
+        phase = "loading"  # Ollama lists a model only once it is fully loaded
+    elif mine and STATUS["waiting"]:
+        phase = "prefill"
+    elif mine and STATUS["inflight"]:
+        phase = "generating"
+    else:
+        phase = "ready" if m else "idle"
+    with STATUS_LOCK:
+        if SHOWN.get(b, (None,))[0] != phase:
+            SHOWN[b] = (phase, time.time())
+    out = {"model": b, "phase": phase, "elapsed": int(time.time() - SHOWN[b][1])}
+    try:  # context the model is serving + whether server-side speedups are on (for the slow hint)
+        params = ollama_mem.show(b)["params"]
+        env = ollama_mem.serve_env()
+        out["ctx"] = int(params.get("num_ctx") or env.get("OLLAMA_CONTEXT_LENGTH") or 0) or None
+        out["fa"] = env.get("OLLAMA_FLASH_ATTENTION", "0") == "1"
+        out["kv"] = env.get("OLLAMA_KV_CACHE_TYPE", "f16")
+    except Exception:
+        pass
+    if out["phase"] == "loading":
+        size = ollama_mem.tags().get(b, 0)
+        rss = ollama_mem.runner_rss(b)
+        out.update(pct=min(99, int(100 * rss / size)) if size else None,
+                   rss_gb=round(rss / ollama_mem.GB, 1), size_gb=round(size / ollama_mem.GB, 1))
+    if m:
+        out.update(size_gb=round(m.get("size", 0) / ollama_mem.GB, 1), expires_at=m.get("expires_at"))
+    elif phase == "idle":  # during a load the load itself eats the free memory: no verdict then
+        try:
+            out["fit"] = ollama_mem.fit(b)
+        except Exception:
+            pass
+    return out
+
+def record_stats(rec):
+    """Append one finished turn to stats.jsonl; sync-models.py turns the medians into /model text."""
+    if not rec.get("main") or not rec.get("t_first") or not rec.get("out"):
+        return
+    gen = time.time() - rec["t_first"]
+    row = {"ts": int(time.time()), "model": rec["model"], "cold": rec["cold"], "in": rec.get("in", 0),
+           "out": rec["out"], "ttft_s": round(rec["t_first"] - rec["t0"], 2),
+           "tok_s": round(rec["out"] / gen, 1) if gen > 0 else None}
+    try:
+        with open(STATS_FILE, "a") as f:
+            f.write(json.dumps(row) + "\n")
+    except OSError:
+        pass
+
+def tap(chunks, rec):
+    """Pass SSE chunks through untouched while noting first-token time and usage counts."""
+    pending = b""
+    for chunk in chunks:
+        if "t_first" not in rec and b"content_block_delta" in chunk:
+            rec["t_first"] = time.time()
+            track(rec["model"], loading=False, waiting=-1)
+        lines = (pending + chunk).split(b"\n")
+        pending = lines.pop()  # keep only the partial trailing line between chunks
+        for line in lines:
+            if line.startswith(b"data:") and b'"usage"' in line:
+                try:
+                    ev = json.loads(line[5:])
+                except ValueError:
+                    continue
+                u = ev.get("usage") or ev.get("message", {}).get("usage") or {}
+                rec["in"] = u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) or rec.get("in", 0)
+                rec["out"] = u.get("output_tokens") or rec.get("out", 0)
+        yield chunk
+
+def unload_models(exclude_model=None):
+    """
+    Unloads all currently loaded models from Ollama's memory/VRAM,
+    optionally keeping exclude_model loaded.
+    """
+    unloaded = []
+    try:
+        req = urllib.request.Request(f"{OLLAMA_HOST}/api/ps")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            ps_data = json.load(resp)
+            loaded_models = ps_data.get("models", [])
+            for m in loaded_models:
+                loaded_name = m.get("name") or m.get("model")
+                if not loaded_name:
+                    continue
+                # Normalize names (compare base names before colon)
+                loaded_base = loaded_name.split(":")[0].strip()
+                exclude_base = exclude_model.split(":")[0].strip() if exclude_model else None
+                if exclude_base and loaded_base == exclude_base:
+                    continue
+
+                # Unload this model from memory
+                payload = json.dumps({"model": loaded_name, "keep_alive": 0}).encode("utf-8")
+                u_req = urllib.request.Request(
+                    f"{OLLAMA_HOST}/api/generate",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                try:
+                    with urllib.request.urlopen(u_req, timeout=5) as u_resp:
+                        u_resp.read()
+                    unloaded.append(loaded_name)
+                    msg = f"[bridge] Switched model: Unloaded '{loaded_name}' from memory (switching to '{exclude_model}')\n"
+                    sys.stderr.write(msg)
+                    sys.stderr.flush()
+                except Exception as ue:
+                    sys.stderr.write(f"[bridge] Failed to unload '{loaded_name}': {ue}\n")
+                    sys.stderr.flush()
+    except Exception as e:
+        sys.stderr.write(f"[bridge] Note: unable to query api/ps for model unloading: {e}\n")
+        sys.stderr.flush()
+    return unloaded
+
+def loaded_model():
+    """Name of the model currently resident in Ollama, or None."""
+    try:
+        with urllib.request.urlopen(f"{OLLAMA_HOST}/api/ps", timeout=2) as resp:
+            models = json.load(resp).get("models", [])
+            return (models[0].get("name") or models[0].get("model")) if models else None
+    except Exception:
+        return None
+
+def is_claude_name(name):
+    """Claude-side names (haiku background calls, 'Default' picker row) that map to a local model."""
+    n = name.lower()
+    return (not n or "claude" in n or "sonnet" in n or "haiku" in n or "fable" in n
+            or n == "opus" or "default" in n)
+
+def switch_model(model):
+    """/model pick: evict every other model, then load `model` right away (no prompt needed)."""
+    with SWITCH_LOCK:
+        if model != LAST_MODEL:
+            return  # a newer pick arrived while waiting for the lock
+        unload_models(exclude_model=model)
+        track(model, loading=True)
+        try:
+            payload = json.dumps({"model": model}).encode("utf-8")
+            req = urllib.request.Request(f"{OLLAMA_HOST}/api/generate", data=payload,
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                resp.read()
+            sys.stderr.write(f"[bridge] Preloaded '{model}' into memory\n")
+        except Exception as e:
+            sys.stderr.write(f"[bridge] Failed to preload '{model}': {e}\n")
+        sys.stderr.flush()
+        track(model, loading=False)
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+class ClaudeOllamaHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+
+    def log_message(self, format, *args):
+        if os.environ.get("BRIDGE_DEBUG") == "1":
+            sys.stderr.write(f"[bridge {time.strftime('%X')}] {format % args}\n")
+            sys.stderr.flush()
+
+    def relay(self, status, headers, chunks):
+        """Send an upstream response with our own chunked framing.
+
+        urllib already de-chunks the upstream body, so forwarding its Transfer-Encoding /
+        Content-Length headers verbatim produced invalid HTTP (curl cut SSE streams short).
+        """
+        self.send_response(status)
+        for k, v in headers.items():
+            if k.lower() not in HOP_HEADERS:
+                self.send_header(k, v)
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        try:
+            for chunk in chunks:
+                if chunk:
+                    self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+                    self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # client disconnected or finished early
+
+    def do_HEAD(self):
+        # Claude Code health-checks with HEAD /api/hello or similar
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        try:
+            self.wfile.write(b"{}")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def do_GET(self):
+        global LAST_MODEL
+        if self.path in ("/health", "/api/hello", "/"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            resp_body = json.dumps({
+                "status": "ok",
+                "bridge": "claude-ollama-bridge",
+                "target_model": DEFAULT_LOCAL_MODEL,
+                "ollama_host": OLLAMA_HOST
+            }).encode("utf-8")
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.end_headers()
+            try:
+                self.wfile.write(resp_body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
+        if self.path.startswith("/api/status/"):
+            # Called by scripts/statusline.py every second per open session. When a session's model
+            # changes (a /model pick), evict the old model and load the new one now. A session seen for
+            # the first time only preloads if nothing is resident. Then report what is happening.
+            path, _, query = self.path.partition("?")
+            session = urllib.parse.parse_qs(query).get("session", [""])[0]
+            model = urllib.parse.unquote(path[len("/api/status/"):]).replace("[1m]", "").strip()
+            if is_claude_name(model):
+                model = LAST_MODEL or loaded_model() or DEFAULT_LOCAL_MODEL
+            elif model:
+                prev = SESSION_MODELS.get(session)
+                SESSION_MODELS[session] = model
+                picked = prev is not None and prev != model
+                if (picked or (prev is None and not loaded_model())) and model != LAST_MODEL:
+                    LAST_MODEL = model
+                    track(model, loading=True)
+                    threading.Thread(target=switch_model, args=(model,), daemon=True).start()
+            resp_body = json.dumps(status_for(model)).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.end_headers()
+            self.wfile.write(resp_body)
+            return
+
+        if self.path in ("/api/unload", "/unload"):
+            unloaded = unload_models()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            resp_body = json.dumps({"status": "ok", "unloaded": unloaded}).encode("utf-8")
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.end_headers()
+            try:
+                self.wfile.write(resp_body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
+        if self.path.startswith("/v1/models"):
+            try:
+                req = urllib.request.Request(f"{OLLAMA_HOST}/api/tags")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    tags_data = json.load(resp)
+                    models_list = []
+                    for m in tags_data.get("models", []):
+                        m_name = m.get("name", "")
+                        clean = m_name.replace(":latest", "")
+                        size_gb = f"{m.get('size', 0) / (1024**3):.1f}GB"
+                        models_list.append({
+                            "id": clean,
+                            "type": "model",
+                            "display_name": f"{clean} ({size_gb})",
+                            "object": "model",
+                            "created": int(time.time()),
+                            "owned_by": "ollama"
+                        })
+                    resp_body = json.dumps({
+                        "object": "list",
+                        "data": models_list,
+                        "has_more": False
+                    }).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp_body)))
+                    self.end_headers()
+                    self.wfile.write(resp_body)
+                    return
+            except Exception:
+                pass
+
+        # Forward other GET requests to Ollama
+        target_url = f"{OLLAMA_HOST}{self.path}"
+        try:
+            req = urllib.request.Request(
+                target_url,
+                headers={k: v for k, v in self.headers.items() if k.lower() != 'host'}
+            )
+            with urllib.request.urlopen(req) as resp:
+                self.relay(resp.status, resp.headers, [resp.read()])
+        except urllib.error.HTTPError as e:
+            self.relay(e.code, e.headers, [e.read()])
+        except Exception as e:
+            self.send_error(502, f"Ollama connection error: {e}")
+
+    def do_POST(self):
+        global LAST_MODEL
+        rec = None  # stats record, set only for /v1/messages aimed at an explicit local model
+        content_length = int(self.headers.get("Content-Length", 0))
+        raw_body = self.rfile.read(content_length)
+
+        if self.path in ("/api/unload", "/unload"):
+            unloaded = unload_models()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            resp_body = json.dumps({"status": "ok", "unloaded": unloaded}).encode("utf-8")
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.end_headers()
+            try:
+                self.wfile.write(resp_body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
+        # Intercept /v1/messages
+        if self.path.startswith("/v1/messages"):
+            try:
+                body = json.loads(raw_body.decode("utf-8"))
+            except Exception as e:
+                self.send_error(400, f"Invalid JSON payload: {e}")
+                return
+
+            # 1. Model resolution:
+            # Map generic Claude names to default, or forward explicit local model name (stripping [1m])
+            requested_model = body.get("model", "")
+            clean_name = requested_model.replace("[1m]", "").strip()
+            if os.environ.get("BRIDGE_DEBUG") == "1":
+                sys.stderr.write(f"[bridge {time.strftime('%X')}] /v1/messages model={requested_model!r} "
+                                 f"stream={body.get('stream')} msgs={len(body.get('messages', []))}\n")
+
+            if is_claude_name(requested_model):
+                # Background calls (title/summary via haiku etc.) ride on whatever is already
+                # loaded, so they never evict the model picked with /model.
+                body["model"] = loaded_model() or LAST_MODEL or DEFAULT_LOCAL_MODEL
+            else:
+                body["model"] = LAST_MODEL = clean_name
+                # Unload any previously loaded models in Ollama when switching to a different model
+                unload_models(exclude_model=body["model"])
+                cold = ollama_mem.base(loaded_model()) != ollama_mem.base(clean_name)
+                # Main turns carry tool definitions; title/summary side calls do not and would skew
+                # the "first token" median shown in /model, so only main turns are recorded.
+                rec = {"model": ollama_mem.base(clean_name), "t0": time.time(), "cold": cold,
+                       "main": bool(body.get("tools"))}
+                track(clean_name, loading=cold, inflight=+1, waiting=+1)
+
+            # 2. Sanitize messages:
+            # Ollama's Jinja chat template rejects role='system' appearing after loop.first.
+            # Convert any non-first system messages into user messages with clear context marker.
+            if "messages" in body and isinstance(body["messages"], list):
+                for idx, msg in enumerate(body["messages"]):
+                    if msg.get("role") == "system":
+                        if idx > 0:
+                            msg["role"] = "user"
+                            content = msg.get("content")
+                            prefix = "[System Context / Environment Information]:\n"
+                            if isinstance(content, str):
+                                msg["content"] = prefix + content
+                            elif isinstance(content, list):
+                                msg["content"] = [{"type": "text", "text": prefix}] + content
+
+            # 3. Strip internal Claude Code fields that Ollama does not recognize
+            for field in ("context_management", "output_config"):
+                body.pop(field, None)
+
+            # 4. Ensure max_tokens is present (Ollama requires it)
+            if not body.get("max_tokens") or body.get("max_tokens") <= 0:
+                body["max_tokens"] = 4096
+
+            clean_body = json.dumps(body).encode("utf-8")
+        else:
+            clean_body = raw_body
+
+        target_url = f"{OLLAMA_HOST}{self.path}"
+        req_headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length")}
+        req_headers["Content-Length"] = str(len(clean_body))
+        req_headers["Content-Type"] = "application/json"
+
+        req = urllib.request.Request(
+            target_url,
+            data=clean_body,
+            headers=req_headers,
+            method="POST"
+        )
+
+        try:
+            with urllib.request.urlopen(req) as resp:
+                # read1 returns whatever has arrived, so SSE events stream in real time
+                chunks = iter(lambda: resp.read1(65536), b"")
+                self.relay(resp.status, resp.headers, tap(chunks, rec) if rec else chunks)
+            if rec:
+                record_stats(rec)
+        except urllib.error.HTTPError as e:
+            err = e.read()
+            if e.code == 500 and b"is not supported" in err:
+                # A capability the model lacks (e.g. "image input is not supported" without an
+                # mmproj) will never succeed. As a 500 Claude Code retried it 10x (~270 s); as a
+                # 400 invalid_request_error it fails once and shows the reason.
+                msg = re.search(rb'[^"\\]*is not supported[^"\\]*', err).group(0).decode()
+                err = json.dumps({"type": "error", "error": {
+                    "type": "invalid_request_error",
+                    "message": f"{body.get('model', 'model')}: {msg}"}}).encode()
+                self.relay(400, {"Content-Type": "application/json"}, [err])
+            else:
+                self.relay(e.code, e.headers, [err])
+        except Exception as e:
+            try:
+                self.send_error(502, f"Ollama connection error: {e}")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        finally:
+            if rec:
+                track(rec["model"], loading=False, inflight=-1, waiting=0 if "t_first" in rec else -1)
+
+def is_running():
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{PORT}/health")
+        with urllib.request.urlopen(req, timeout=1) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+def get_pid():
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, "r") as f:
+                return int(f.read().strip())
+        except Exception:
+            return None
+    return None
+
+def start_daemon():
+    if is_running():
+        print(f"Bridge is already running on port {PORT}")
+        return 0
+
+    os.makedirs(RUN_DIR, exist_ok=True)
+    with open(LOG_FILE, "a") as log_out:
+        proc = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "run"],
+            stdout=log_out,
+            stderr=log_out,
+            start_new_session=True
+        )
+        with open(PID_FILE, "w") as pf:
+            pf.write(str(proc.pid))
+
+    # Wait up to 3 seconds for health check to succeed
+    for _ in range(30):
+        time.sleep(0.1)
+        if is_running():
+            print(f"Bridge started successfully on port {PORT} (PID {proc.pid})")
+            return 0
+
+    print("Warning: Bridge process started but health check timed out. Check:", LOG_FILE)
+    return 1
+
+def stop_daemon():
+    pid = get_pid()
+    stopped = False
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(20):
+                time.sleep(0.1)
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    stopped = True
+                    break
+            if not stopped:
+                os.kill(pid, signal.SIGKILL)
+        except OSError:
+            stopped = True
+
+    if os.path.exists(PID_FILE):
+        try:
+            os.remove(PID_FILE)
+        except OSError:
+            pass
+
+    if is_running():
+        # Kill by port if PID file was stale
+        subprocess.run(f"lsof -ti:{PORT} | xargs kill -9 2>/dev/null || true", shell=True)
+
+    print("Bridge stopped.")
+    return 0
+
+def run_foreground():
+    os.makedirs(RUN_DIR, exist_ok=True)
+    with open(PID_FILE, "w") as pf:
+        pf.write(str(os.getpid()))
+
+    server_address = ("127.0.0.1", PORT)
+    try:
+        with ThreadingHTTPServer(server_address, ClaudeOllamaHandler) as httpd:
+            print(f"Claude-Ollama Bridge running on http://127.0.0.1:{PORT} -> {OLLAMA_HOST}")
+            print(f"Default model: {DEFAULT_LOCAL_MODEL}")
+            sys.stdout.flush()
+            httpd.serve_forever()
+    finally:
+        if os.path.exists(PID_FILE):
+            try:
+                os.remove(PID_FILE)
+            except OSError:
+                pass
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+
+    if cmd == "start":
+        sys.exit(start_daemon())
+    elif cmd == "stop":
+        sys.exit(stop_daemon())
+    elif cmd == "restart":
+        stop_daemon()
+        time.sleep(0.5)
+        sys.exit(start_daemon())
+    elif cmd == "unload":
+        unloaded = unload_models()
+        if unloaded:
+            print(f"✓ Unloaded {len(unloaded)} model(s) from memory: {', '.join(unloaded)}")
+        else:
+            print("✓ No models were occupying memory.")
+        sys.exit(0)
+    elif cmd == "status":
+        if is_running():
+            pid = get_pid()
+            print(f"Bridge is running on port {PORT} (PID {pid or 'unknown'})")
+            sys.exit(0)
+        else:
+            print(f"Bridge is not running on port {PORT}")
+            sys.exit(1)
+    elif cmd == "run":
+        run_foreground()
+    else:
+        print(f"Usage: {sys.argv[0]} {{start|stop|restart|status|unload|run}}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

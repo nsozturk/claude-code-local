@@ -1,0 +1,6 @@
+[
+  { "model": "qwen2.5-coder:7b",  "label": "qwen2.5-coder:7b",  "description": "Qwen2.5 Coder 7B",        "category": "coding",  "behavesAs": "claude-3-5-sonnet-20241022" },
+  { "model": "qwen2.5-coder:14b", "label": "qwen2.5-coder:14b", "description": "Qwen2.5 Coder 14B",       "category": "coding",  "behavesAs": "claude-3-5-sonnet-20241022" },
+  { "model": "llama3.1:8b",       "label": "llama3.1:8b",       "description": "Llama 3.1 8B",            "category": "general", "behavesAs": "claude-3-5-sonnet-20241022" },
+  { "model": "deepseek-r1:14b",   "label": "deepseek-r1:14b",   "description": "DeepSeek-R1 14B (reasoning)", "category": "reasoning", "behavesAs": "claude-3-5-sonnet-20241022" }
+]

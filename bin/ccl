@@ -1,0 +1,308 @@
+#!/usr/bin/env bash
+# ccl (Claude Code Local — run Claude Code on local Ollama models)
+# ------------------------------------------
+# Claude Code CLI runner powered by local Ollama models (35B MoE, 27B MTP, 9B, 4B, 2B)
+# Completely isolated profile: ~/.claude-isvalorum
+# Official Claude Code (claude / cc / Opus) is 100% UNTOUCHED and fully functional.
+
+set -e
+
+# Resolve true script path even when invoked through symlinks
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+PROJECT_ROOT="$(cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)"
+
+BRIDGE_PORT="${BRIDGE_PORT:-11435}"
+BRIDGE_URL="http://127.0.0.1:${BRIDGE_PORT}"
+OLLAMA_URL="${OLLAMA_HOST:-http://127.0.0.1:11434}"
+CLAUDE_HOME="$HOME/.claude-isvalorum"
+CLAUDE_CONFIG_DIR="$HOME/.claude-isvalorum"
+SETTINGS_FILE="$CLAUDE_HOME/settings.json"
+BRIDGE_CMD="$PROJECT_ROOT/bin/claude-ollama-bridge"
+SYNC_SCRIPT="$PROJECT_ROOT/scripts/sync-models.py"
+VERIFY_SCRIPT="$PROJECT_ROOT/scripts/verify-picker.py"
+VERIFIED_FILE="$CLAUDE_HOME/.verified-claude-version"
+
+# ccl runs the same `claude` binary as official Claude Code, so every Claude Code
+# update reaches ccl automatically. This re-checks /model once per new version.
+verify_picker() {
+    local version
+    version="$(command claude --version 2>/dev/null | awk '{print $1}')"
+    echo "🔎 Claude Code $version — checking /model lists local models..."
+    if python3 "$VERIFY_SCRIPT"; then
+        echo "$version" > "$VERIFIED_FILE"
+        return 0
+    fi
+    echo "⚠️  /model picker check failed on Claude Code $version (ccl will still start)." >&2
+    return 1
+}
+
+CLI_MODEL=""
+PASSTHROUGH_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --list|-l)
+            COUNT=$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$PROJECT_ROOT/config/models.json" 2>/dev/null || echo "24")
+            echo "=========================================================="
+            echo "   📋 CCL — Local Ollama Models Catalog ($COUNT models)    "
+            echo "=========================================================="
+            echo ""
+            if [ -f "$PROJECT_ROOT/config/models.json" ]; then
+                python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    models = json.load(f)
+for m in models:
+    model_name = m["model"]
+    size_str = m.get("size", "?")
+    cat = m.get("category", "genel").upper()
+    desc = m.get("description", "")
+    print(f"  • {model_name:36} | {size_str:7} | [{cat:9}] | {desc}")
+' "$PROJECT_ROOT/config/models.json"
+            else
+                ollama list
+            fi
+            echo ""
+            echo "⚡ Currently loaded in memory (RAM/VRAM):"
+            ollama ps 2>/dev/null || echo "  (Ollama is down or no model is loaded)"
+            echo ""
+            echo "💡 Quick usage:"
+            echo "  ccl                           (start with the default model)"
+            echo "  ccl -m <model-name>           (e.g. ccl -m swift-27b-mtp, this session only)"
+            echo "  ccl --unload                  (evict all models from RAM/VRAM now)"
+            echo "  ccl --bridge {status|restart} (manage the bridge daemon)"
+            echo "  ccl --update                  (update Claude Code + verify /model lists local models)"
+            echo "  ccl --doctor                  (verify the /model picker lists local models)"
+            echo "  ccl --tune [model]            (LM Studio benzeri ayar paneli: context, GPU, thread, FA, KV cache...)"
+            echo "  ccl --fix-ctx                 (make 128k variants of models whose context is too small)"
+            echo "  Inside Claude: /model         (switching evicts the previous model from RAM)"
+            exit 0
+            ;;
+        --unload)
+            echo "🧹 Evicting local models from RAM/VRAM..."
+            if [ -x "$BRIDGE_CMD" ]; then
+                "$BRIDGE_CMD" unload
+            else
+                curl -s "$BRIDGE_URL/api/unload" > /dev/null 2>&1 || true
+            fi
+            echo "✨ Memory cleared."
+            exit 0
+            ;;
+        --update)
+            # Update the shared Claude Code binary with the official profile, then re-verify ccl.
+            env -u CLAUDE_CONFIG_DIR -u CLAUDE_HOME -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN \
+                -u ANTHROPIC_MODEL claude update
+            verify_picker
+            exit $?
+            ;;
+        --doctor)
+            verify_picker
+            exit $?
+            ;;
+        --fix-ctx)
+            # Models with a context too small for Claude Code's opening prompt → -ctx128k variants
+            exec python3 "$PROJECT_ROOT/scripts/tune.py" --fix-ctx
+            ;;
+        --tune)
+            # LM Studio-style settings: model params → variant model, server params → Ollama env
+            exec python3 "$PROJECT_ROOT/scripts/tune.py" "${2:-}"
+            ;;
+        --bridge)
+            shift
+            if [ -x "$BRIDGE_CMD" ]; then
+                "$BRIDGE_CMD" "$@"
+            else
+                echo "Error: bridge script not found: $BRIDGE_CMD" >&2
+                exit 1
+            fi
+            exit 0
+            ;;
+        -m|--model)
+            if [ -n "$2" ]; then
+                CLI_MODEL="$2"
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        --model=*)
+            CLI_MODEL="${1#*=}"
+            shift
+            ;;
+        *)
+            PASSTHROUGH_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Saved default (what /model + Enter persisted). `-m` / env picks are for this session only:
+# they must not rewrite the default that every later `ccl` launch starts with.
+SAVED=""
+if [ -f "$SETTINGS_FILE" ]; then
+    SAVED=$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        print(json.load(f).get("model", ""))
+except Exception:
+    pass
+' "$SETTINGS_FILE" 2>/dev/null || true)
+fi
+SAVED="${SAVED:-isvalorum-35b}"
+
+# Resolve selected model: CLI flag > env LOCAL_MODEL > env ISVALORUM_MODEL > saved default
+SELECTED_MODEL="${CLI_MODEL:-${LOCAL_MODEL:-${ISVALORUM_MODEL:-$SAVED}}}"
+
+# Clean model name (base model name without tag or 1m suffix)
+RAW_MODEL="${SELECTED_MODEL%:latest}"
+RAW_MODEL="${RAW_MODEL%\[1m\]}"
+
+# Export active model for the bridge
+export DEFAULT_LOCAL_MODEL="${RAW_MODEL}:latest"
+
+# 1. Ensure Ollama is reachable
+if ! curl -s --max-time 1 "$OLLAMA_URL/api/tags" > /dev/null 2>&1; then
+    echo "⚠️  Ollama does not appear to be running at $OLLAMA_URL."
+    echo "   Attempting to start Ollama..."
+    if command -v ollama &> /dev/null; then
+        ollama serve > /dev/null 2>&1 &
+        sleep 2
+    fi
+    if ! curl -s --max-time 2 "$OLLAMA_URL/api/tags" > /dev/null 2>&1; then
+        echo "❌ Error: Could not connect to Ollama at $OLLAMA_URL!" >&2
+        echo "   Please start Ollama with 'ollama serve' and verify 'ollama list'." >&2
+        exit 1
+    fi
+fi
+
+# 2. Ensure bridge is running
+if ! curl -s --max-time 1 "$BRIDGE_URL/health" > /dev/null 2>&1; then
+    if [ -x "$BRIDGE_CMD" ]; then
+        "$BRIDGE_CMD" start > /dev/null 2>&1 || true
+    fi
+fi
+
+if ! curl -s --max-time 2 "$BRIDGE_URL/health" > /dev/null 2>&1; then
+    echo "❌ Error: Claude-Ollama bridge is not responding at $BRIDGE_URL!" >&2
+    echo "   Try running: $BRIDGE_CMD start" >&2
+    exit 1
+fi
+
+# 3. Synchronize settings.json with all local models for Claude Code /model picker
+mkdir -p "$CLAUDE_HOME"
+if [ -f "$SYNC_SCRIPT" ]; then
+    python3 "$SYNC_SCRIPT" "${SAVED%\[1m\]}" "$SETTINGS_FILE" > /dev/null 2>&1 || true
+fi
+
+# 3b. First launch on a new Claude Code version: confirm /model still lists local models
+if [ -t 1 ] && [ -z "$CCL_SKIP_VERIFY" ] && \
+   [ "$(command claude --version 2>/dev/null | awk '{print $1}')" != "$(cat "$VERIFIED_FILE" 2>/dev/null)" ]; then
+    verify_picker || true
+fi
+
+# 3c. Memory fit + server settings drift (both warn only; ccl still starts)
+if [ -t 1 ]; then
+    python3 - "$RAW_MODEL" "$PROJECT_ROOT/scripts" <<'PY' || true
+import json, os, sys
+sys.path.insert(0, sys.argv[2])
+import ollama_mem as m
+model = sys.argv[1]
+try:
+    if model not in {m.base(x["name"]) for x in m.loaded()}:
+        f = m.fit(model)
+        if not f["ok"]:
+            lms = f" (LM Studio {f['lmstudio_gb']} GB tutuyor: 'lms unload --all')" if f["lmstudio_gb"] else ""
+            print(f"⚠️  {model}: needs ~{f['need_gb']} GB (weights {f['weights_gb']} + KV {f['kv_gb']} GB @ ctx {f['ctx']}), "
+                  f"~{f['avail_gb']} GB free{lms}. For a smaller ctx: ccl --tune {model}")
+    want = json.load(open(os.path.expanduser("~/.claude-isvalorum/ollama-env.json")))
+    have = m.serve_env()
+    defaults = {"OLLAMA_FLASH_ATTENTION": "0", "OLLAMA_KV_CACHE_TYPE": "f16", "OLLAMA_NUM_PARALLEL": "1", "OLLAMA_KEEP_ALIVE": "5m"}
+    drift = [k for k, v in want.items() if v != defaults.get(k) and have.get(k) != v]
+    if drift:
+        print(f"⚠️  Saved Ollama settings are not live ({', '.join(drift)}) — likely after a restart. "
+              "Re-apply with: ccl --tune")
+except FileNotFoundError:
+    pass
+except Exception as e:
+    print(f"(memory check skipped: {e})")
+PY
+fi
+
+# 4. Configure isolated profile environment variables (1M Max Context — claude-glm style)
+export ANTHROPIC_BASE_URL="$BRIDGE_URL"
+export ANTHROPIC_AUTH_TOKEN="ollama-local"
+export ANTHROPIC_MODEL="$RAW_MODEL"
+
+# IMPORTANT: Do NOT export ANTHROPIC_DEFAULT_OPUS_MODEL / SONNET / HAIKU
+# Leaving them unset allows Claude Code's modelPicker.options with replaceBuiltInOptions
+# to cleanly display the curated 21 local models list without duplicates.
+unset ANTHROPIC_DEFAULT_OPUS_MODEL
+unset ANTHROPIC_DEFAULT_SONNET_MODEL
+unset ANTHROPIC_DEFAULT_HAIKU_MODEL
+
+export CLAUDE_CODE_AUTO_COMPACT_WINDOW="1000000"
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS="1000000"
+export CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT="1"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
+export API_TIMEOUT_MS="3000000"
+
+export CLAUDE_HOME="$HOME/.claude-isvalorum"
+export CLAUDE_CONFIG_DIR="$HOME/.claude-isvalorum"
+
+# 5. Enforce --dangerously-skip-permissions by default — unless the caller chose a permission
+#    mode (e.g. --permission-mode plan): bypass would override it and plan mode would edit files.
+HAS_DANGEROUS_FLAG=0
+for arg in "${PASSTHROUGH_ARGS[@]}"; do
+    case "$arg" in
+        --dangerously-skip-permissions|--permission-mode|--permission-mode=*)
+            HAS_DANGEROUS_FLAG=1
+            break
+            ;;
+    esac
+done
+
+if [ "$HAS_DANGEROUS_FLAG" -eq 0 ]; then
+    PASSTHROUGH_ARGS=("--dangerously-skip-permissions" "${PASSTHROUGH_ARGS[@]}")
+fi
+
+# 5b. Session-only model (-m / env): settings.json keeps the saved default, so pass it as --model
+if [ "$RAW_MODEL" != "${SAVED%\[1m\]}" ]; then
+    PASSTHROUGH_ARGS=("--model" "$RAW_MODEL" "${PASSTHROUGH_ARGS[@]}")
+fi
+
+# 6. Enforce --settings flag so Claude Code loads modelPicker into flagSettings
+HAS_SETTINGS_FLAG=0
+for arg in "${PASSTHROUGH_ARGS[@]}"; do
+    if [ "$arg" = "--settings" ]; then
+        HAS_SETTINGS_FLAG=1
+        break
+    fi
+done
+
+if [ "$HAS_SETTINGS_FLAG" -eq 0 ]; then
+    PASSTHROUGH_ARGS=("--settings" "$SETTINGS_FILE" "${PASSTHROUGH_ARGS[@]}")
+fi
+
+if [ -t 1 ]; then
+    echo "🚀 Starting Claude Code with local model: $RAW_MODEL"
+    echo "📁 Profile: $CLAUDE_HOME"
+    echo "🔌 Bridge:  $BRIDGE_URL -> $OLLAMA_URL"
+    echo "🛡️  Mode:    --dangerously-skip-permissions (active by default)"
+    MODEL_COUNT=$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$PROJECT_ROOT/config/models.json" 2>/dev/null || echo "24")
+    echo "💡 Switch:  Type /model to select from $MODEL_COUNT local models (memory auto-unloads on switch)"
+    echo ""
+fi
+
+if ! command -v claude &> /dev/null; then
+    echo "❌ Error: 'claude' command not found!" >&2
+    exit 1
+fi
+
+exec claude "${PASSTHROUGH_ARGS[@]}"
