@@ -23,6 +23,7 @@ OLLAMA_URL="${OLLAMA_HOST:-http://127.0.0.1:11434}"
 CLAUDE_HOME="$HOME/.claude-isvalorum"
 CLAUDE_CONFIG_DIR="$HOME/.claude-isvalorum"
 SETTINGS_FILE="$CLAUDE_HOME/settings.json"
+LAST_MODEL_FILE="$CLAUDE_HOME/.last-model"
 BRIDGE_CMD="$PROJECT_ROOT/bin/claude-ollama-bridge"
 SYNC_SCRIPT="$PROJECT_ROOT/scripts/sync-models.py"
 VERIFY_SCRIPT="$PROJECT_ROOT/scripts/verify-picker.py"
@@ -148,10 +149,13 @@ for m in models:
     esac
 done
 
-# Saved default (what /model + Enter persisted). `-m` / env picks are for this session only:
-# they must not rewrite the default that every later `ccl` launch starts with.
+# Default model = the one you last actually used (bridge writes it to .last-model), falling back to
+# the /model-saved default in settings.json, then isvalorum-35b. `-m` / env picks are session-only.
 SAVED=""
-if [ -f "$SETTINGS_FILE" ]; then
+if [ -f "$LAST_MODEL_FILE" ]; then
+    SAVED=$(tr -d '[:space:]' < "$LAST_MODEL_FILE" 2>/dev/null || true)
+fi
+if [ -z "$SAVED" ] && [ -f "$SETTINGS_FILE" ]; then
     SAVED=$(python3 -c '
 import json, sys
 try:
@@ -163,7 +167,7 @@ except Exception:
 fi
 SAVED="${SAVED:-isvalorum-35b}"
 
-# Resolve selected model: CLI flag > env LOCAL_MODEL > env ISVALORUM_MODEL > saved default
+# Resolve selected model: CLI flag > env LOCAL_MODEL > env ISVALORUM_MODEL > last-used/saved default
 SELECTED_MODEL="${CLI_MODEL:-${LOCAL_MODEL:-${ISVALORUM_MODEL:-$SAVED}}}"
 
 # Clean model name (base model name without tag or 1m suffix)
@@ -244,7 +248,9 @@ fi
 # 4. Configure isolated profile environment variables (1M Max Context — claude-glm style)
 export ANTHROPIC_BASE_URL="$BRIDGE_URL"
 export ANTHROPIC_AUTH_TOKEN="ollama-local"
-export ANTHROPIC_MODEL="$RAW_MODEL"
+# ANTHROPIC_MODEL is intentionally NOT exported: it would override the saved default and
+# make Claude Code warn "new sessions use that while it is set". Claude Code uses
+# settings.json "model" (which sync-models sets to the last-used model) instead.
 
 # IMPORTANT: Do NOT export ANTHROPIC_DEFAULT_OPUS_MODEL / SONNET / HAIKU
 # Leaving them unset allows Claude Code's modelPicker.options with replaceBuiltInOptions

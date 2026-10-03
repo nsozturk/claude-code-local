@@ -46,6 +46,7 @@ HOP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "content-length"
 LAST_MODEL = None  # last model explicitly requested by Claude Code (/model pick)
 SWITCH_LOCK = threading.Lock()  # serializes /model preloads so rapid picks never leave two models resident
 STATS_FILE = os.path.join(RUN_DIR, "stats.jsonl")
+LAST_MODEL_FILE = os.path.join(RUN_DIR, ".last-model")  # the model actually used last → ccl's next default
 # Last model each Claude Code session reported via its status line. Only a *change* within one
 # session is a /model pick; several open ccl sessions must not evict each other every second.
 SESSION_MODELS = {}
@@ -419,6 +420,11 @@ class ClaudeOllamaHandler(http.server.BaseHTTPRequestHandler):
                 body["model"] = loaded_model() or LAST_MODEL or DEFAULT_LOCAL_MODEL
             else:
                 body["model"] = LAST_MODEL = clean_name
+                try:  # remember what the user last ran, so the next ccl launch starts on it
+                    with open(LAST_MODEL_FILE, "w") as lf:
+                        lf.write(ollama_mem.base(clean_name))
+                except OSError:
+                    pass
                 # Unload any previously loaded models in Ollama when switching to a different model
                 unload_models(exclude_model=body["model"])
                 cold = ollama_mem.base(loaded_model()) != ollama_mem.base(clean_name)
