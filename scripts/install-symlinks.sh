@@ -16,11 +16,14 @@ ln -sf "$BIN_DIR/ccl" "$TARGET_DIR/ccl"
 ln -sf "$BIN_DIR/cci" "$TARGET_DIR/cci"                         # legacy alias → ccl
 ln -sf "$BIN_DIR/claude-isvalorum" "$TARGET_DIR/claude-isvalorum"  # legacy alias → ccl
 ln -sf "$BIN_DIR/claude-ollama-bridge" "$TARGET_DIR/claude-ollama-bridge"
+ln -sf "$PROJECT_ROOT/scripts/search-hf.py" "$TARGET_DIR/ccl-search-hf"       # HF model search, from anywhere
+ln -sf "$PROJECT_ROOT/scripts/import-model.py" "$TARGET_DIR/ccl-import-model" # import a model, from anywhere
 
 echo "✓ $TARGET_DIR/ccl -> $BIN_DIR/ccl"
 echo "✓ $TARGET_DIR/cci -> $BIN_DIR/cci (legacy)"
 echo "✓ $TARGET_DIR/claude-isvalorum -> (legacy)"
 echo "✓ $TARGET_DIR/claude-ollama-bridge -> $BIN_DIR/claude-ollama-bridge"
+echo "✓ $TARGET_DIR/ccl-search-hf, ccl-import-model"
 
 # Install the /find-model slash command into the isolated ccl profile
 PROFILE_CMDS="$HOME/.claude-isvalorum/commands"

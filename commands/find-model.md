@@ -7,14 +7,13 @@ Their request: $ARGUMENTS
 
 Do this, step by step, pausing for the user's choice:
 
-1. Run: `python3 scripts/search-hf.py $ARGUMENTS`
-   (if that path isn't present, try `~/.claude-isvalorum/scripts/search-hf.py` or the ccl repo's scripts dir).
+1. Run: `ccl-search-hf $ARGUMENTS`  (installed on PATH; or `python3 scripts/search-hf.py $ARGUMENTS` from the ccl repo)
    Show the ranked list and ask the user which number they want.
 
-2. For the chosen repo, run: `python3 scripts/search-hf.py --repo <that-repo-id>`
+2. For the chosen repo, run: `ccl-search-hf --repo <that-repo-id>`
    Show the quants and point out the recommended one (marked ←). Ask which quant, defaulting to the recommended.
 
-3. Import it: `python3 scripts/import-model.py hf.co/<repo>:<quant>`
+3. Import it: `ccl-import-model hf.co/<repo>:<quant>`
    Then, if the tool says the context is too small, run `ccl --fix-ctx`.
 
 4. Tell the user it's ready and that they can pick it with `/model`.
