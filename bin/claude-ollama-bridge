@@ -293,9 +293,11 @@ class ClaudeOllamaHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if self.path.startswith("/api/status/"):
-            # Called by scripts/statusline.py every second per open session. When a session's model
-            # changes (a /model pick), evict the old model and load the new one now. A session seen for
-            # the first time only preloads if nothing is resident. Then report what is happening.
+            # Called by scripts/statusline.py every second per open session. The selected model must
+            # be the one resident — so a session's FIRST poll (new launch) and any /model change both
+            # evict whatever else is loaded and load the selection now, regardless of what another
+            # session or app left resident. Repeated polls of an unchanged model don't re-trigger, so
+            # two concurrent sessions on different models don't thrash each other every second.
             path, _, query = self.path.partition("?")
             session = urllib.parse.parse_qs(query).get("session", [""])[0]
             model = urllib.parse.unquote(path[len("/api/status/"):]).replace("[1m]", "").strip()
@@ -304,8 +306,8 @@ class ClaudeOllamaHandler(http.server.BaseHTTPRequestHandler):
             elif model:
                 prev = SESSION_MODELS.get(session)
                 SESSION_MODELS[session] = model
-                picked = prev is not None and prev != model
-                if (picked or (prev is None and not loaded_model())) and model != LAST_MODEL:
+                first_or_changed = prev is None or prev != model
+                if first_or_changed and model != LAST_MODEL:
                     LAST_MODEL = model
                     track(model, loading=True)
                     threading.Thread(target=switch_model, args=(model,), daemon=True).start()
@@ -421,7 +423,7 @@ class ClaudeOllamaHandler(http.server.BaseHTTPRequestHandler):
                 unload_models(exclude_model=body["model"])
                 cold = ollama_mem.base(loaded_model()) != ollama_mem.base(clean_name)
                 # Main turns carry tool definitions; title/summary side calls do not and would skew
-                # the "first token" median shown in /model, so only main turns are recorded.
+                # the "ilk token" median shown in /model, so only main turns are recorded.
                 rec = {"model": ollama_mem.base(clean_name), "t0": time.time(), "cold": cold,
                        "main": bool(body.get("tools"))}
                 track(clean_name, loading=cold, inflight=+1, waiting=+1)
