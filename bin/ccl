@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
         --list|-l)
             COUNT=$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$PROJECT_ROOT/config/models.json" 2>/dev/null || echo "24")
             echo "=========================================================="
-            echo "   📋 CCL — Local Ollama Models Catalog ($COUNT models)    "
+            echo "   📋 CCL - Yerel Ollama Modelleri Kataloğu ($COUNT Model)    "
             echo "=========================================================="
             echo ""
             if [ -f "$PROJECT_ROOT/config/models.json" ]; then
@@ -69,29 +69,29 @@ for m in models:
                 ollama list
             fi
             echo ""
-            echo "⚡ Currently loaded in memory (RAM/VRAM):"
-            ollama ps 2>/dev/null || echo "  (Ollama is down or no model is loaded)"
+            echo "⚡ Şu an Bellekte (RAM/VRAM) Yüklü Model:"
+            ollama ps 2>/dev/null || echo "  (Ollama kapalı veya model yüklü değil)"
             echo ""
-            echo "💡 Quick usage:"
-            echo "  ccl                           (start with the default model)"
-            echo "  ccl -m <model-name>           (e.g. ccl -m swift-27b-mtp, this session only)"
-            echo "  ccl --unload                  (evict all models from RAM/VRAM now)"
-            echo "  ccl --bridge {status|restart} (manage the bridge daemon)"
-            echo "  ccl --update                  (update Claude Code + verify /model lists local models)"
-            echo "  ccl --doctor                  (verify the /model picker lists local models)"
+            echo "💡 Hızlı Kullanım:"
+            echo "  ccl                           (Varsayılan isvalorum-35b ile başlatır)"
+            echo "  ccl -m <model-adı>            (Örn: ccl -m swift-27b-mtp)"
+            echo "  ccl --unload                  (Tüm modelleri RAM/VRAM'den anında boşaltır)"
+            echo "  ccl --bridge {status|restart} (Köprü servisini yönetir)"
+            echo "  ccl --update                  (Claude Code'u günceller + /model yerel modelleri test eder)"
+            echo "  ccl --doctor                  (/model seçicisinin yerel modelleri listelediğini test eder)"
             echo "  ccl --tune [model]            (LM Studio benzeri ayar paneli: context, GPU, thread, FA, KV cache...)"
-            echo "  ccl --fix-ctx                 (make 128k variants of models whose context is too small)"
-            echo "  Inside Claude: /model         (switching evicts the previous model from RAM)"
+            echo "  ccl --fix-ctx                 (32k context'li modellere Claude Code için 128k varyant oluşturur)"
+            echo "  Claude içinde: /model         (Model seçildiğinde önceki model RAM'den boşaltılır)"
             exit 0
             ;;
         --unload)
-            echo "🧹 Evicting local models from RAM/VRAM..."
+            echo "🧹 Yerel modeller RAM/VRAM'den boşaltılıyor..."
             if [ -x "$BRIDGE_CMD" ]; then
                 "$BRIDGE_CMD" unload
             else
                 curl -s "$BRIDGE_URL/api/unload" > /dev/null 2>&1 || true
             fi
-            echo "✨ Memory cleared."
+            echo "✨ Bellek başarıyla temizlendi."
             exit 0
             ;;
         --update)
@@ -118,10 +118,16 @@ for m in models:
             if [ -x "$BRIDGE_CMD" ]; then
                 "$BRIDGE_CMD" "$@"
             else
-                echo "Error: bridge script not found: $BRIDGE_CMD" >&2
+                echo "Hata: Bridge scripti bulunamadı: $BRIDGE_CMD" >&2
                 exit 1
             fi
             exit 0
+            ;;
+        -resume|--resume)
+            # Normalize to --resume. A single-dash -resume makes Claude Code read it as -r + "esume"
+            # and prefill the resume search with "esume"; --resume opens the picker clean.
+            PASSTHROUGH_ARGS+=("--resume")
+            shift
             ;;
         -m|--model)
             if [ -n "$2" ]; then
@@ -219,19 +225,19 @@ try:
         f = m.fit(model)
         if not f["ok"]:
             lms = f" (LM Studio {f['lmstudio_gb']} GB tutuyor: 'lms unload --all')" if f["lmstudio_gb"] else ""
-            print(f"⚠️  {model}: needs ~{f['need_gb']} GB (weights {f['weights_gb']} + KV {f['kv_gb']} GB @ ctx {f['ctx']}), "
-                  f"~{f['avail_gb']} GB free{lms}. For a smaller ctx: ccl --tune {model}")
+            print(f"⚠️  {model}: ~{f['need_gb']} GB gerekli (ağırlık {f['weights_gb']} + KV {f['kv_gb']} GB @ ctx {f['ctx']}), "
+                  f"boş ~{f['avail_gb']} GB{lms}. Daha küçük ctx için: ccl --tune {model}")
     want = json.load(open(os.path.expanduser("~/.claude-isvalorum/ollama-env.json")))
     have = m.serve_env()
     defaults = {"OLLAMA_FLASH_ATTENTION": "0", "OLLAMA_KV_CACHE_TYPE": "f16", "OLLAMA_NUM_PARALLEL": "1", "OLLAMA_KEEP_ALIVE": "5m"}
     drift = [k for k, v in want.items() if v != defaults.get(k) and have.get(k) != v]
     if drift:
-        print(f"⚠️  Saved Ollama settings are not live ({', '.join(drift)}) — likely after a restart. "
-              "Re-apply with: ccl --tune")
+        print(f"⚠️  Kayıtlı Ollama ayarları sunucuda yok ({', '.join(drift)}) — muhtemelen yeniden başlatma sonrası. "
+              "Tekrar uygulamak için: ccl --tune")
 except FileNotFoundError:
     pass
 except Exception as e:
-    print(f"(memory check skipped: {e})")
+    print(f"(bellek kontrolü atlandı: {e})")
 PY
 fi
 
