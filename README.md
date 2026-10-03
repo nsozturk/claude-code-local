@@ -81,6 +81,7 @@ ccl                                    # first run syncs your Ollama models into
 | `ccl --doctor` | Just run that verification |
 | `ccl --bridge {status\|restart\|stop}` | Manage the translation bridge daemon |
 | `/model` (inside Claude Code) | Switch models; the previous one is evicted, the new one preloads |
+| `/find-model <keywords>` (inside Claude Code) | Search Hugging Face for a GGUF model by keyword and import it |
 
 ### Importing a model
 
