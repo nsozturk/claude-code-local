@@ -1,0 +1,36 @@
+---
+title: Claude Code Local
+description: Run Claude Code on your own local models at zero API cost with instant VRAM eviction and unified memory management.
+template: splash
+hero:
+  tagline: Run official Claude Code on your own local models (Ollama, LM Studio, GGUF) at zero API cost.
+  image:
+    file: ../../../assets/banner.png
+  actions:
+    - text: Get Started
+      link: /claude-code-local/getting-started/quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/nsozturk/claude-code-local
+      icon: external
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Key Features
+
+<CardGrid stagger>
+  <Card title="Zero API Cost" icon="star">
+    Run full coding sessions entirely on local silicon with zero cloud subscription fees or API meter charges.
+  </Card>
+  <Card title="Instant VRAM Eviction" icon="rocket">
+    Evict stale models instantly from unified memory when switching models via `/model`, eliminating swap storms.
+  </Card>
+  <Card title="Context Auto-Expansion" icon="setting">
+    Automatically generates 128k context variants (`-ctx128k`) via APFS zero-byte hardlinks without extra disk footprint.
+  </Card>
+  <Card title="100% Isolated Profile" icon="padlock">
+    Runs under `~/.claude-isvalorum`, keeping official Anthropic settings and credentials completely untouched.
+  </Card>
+</CardGrid>

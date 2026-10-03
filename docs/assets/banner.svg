@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" font-family="'Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="0.55" stop-color="#121a2b"/>
+      <stop offset="1" stop-color="#0a0e16"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#d97757"/>
+      <stop offset="1" stop-color="#e8a06b"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1f6feb" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#1f6feb" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="360" fill="url(#bg)"/>
+  <circle cx="1080" cy="80" r="360" fill="url(#glow)"/>
+
+  <!-- left: wordmark + tagline -->
+  <text x="80" y="150" fill="#ffffff" font-size="72" font-weight="800" letter-spacing="-2">Claude Code Local</text>
+  <text x="84" y="205" fill="#8b98a9" font-size="25" font-weight="500">Run Claude Code on your own models — <tspan fill="#e8a06b" font-weight="700">zero API cost</tspan>.</text>
+
+  <!-- command chip -->
+  <g transform="translate(84,238)">
+    <rect width="150" height="46" rx="10" fill="#161b22" stroke="#30363d"/>
+    <text x="22" y="31" fill="url(#accent)" font-size="24" font-weight="700" font-family="'SF Mono',Menlo,monospace">ccl</text>
+    <rect x="70" y="18" width="11" height="11" rx="2" fill="#3fb950"/>
+    <text x="90" y="30" fill="#8b98a9" font-size="16" font-family="'SF Mono',Menlo,monospace">/model</text>
+  </g>
+  <text x="252" y="268" fill="#6e7681" font-size="18">Ollama · LM Studio · Hugging Face  →  the Claude Code picker</text>
+
+  <!-- right: terminal card -->
+  <g transform="translate(792,96)">
+    <rect width="408" height="168" rx="14" fill="#0b0f16" stroke="#2a3342"/>
+    <circle cx="26" cy="26" r="6" fill="#ff5f56"/>
+    <circle cx="48" cy="26" r="6" fill="#ffbd2e"/>
+    <circle cx="70" cy="26" r="6" fill="#27c93f"/>
+    <text x="24" y="74" font-family="'SF Mono',Menlo,monospace" font-size="17" fill="#c9d1d9"><tspan fill="#d97757">$</tspan> ccl</text>
+    <text x="24" y="104" font-family="'SF Mono',Menlo,monospace" font-size="16" fill="#8b98a9">🦙 ✓ qwen3-coder · ctx 256k · 22 GB resident</text>
+    <text x="24" y="132" font-family="'SF Mono',Menlo,monospace" font-size="16" fill="#8b98a9"><tspan fill="#3fb950">⏳</tspan> loading swift-27b %62 · 10/16 GB</text>
+    <text x="24" y="156" font-family="'SF Mono',Menlo,monospace" font-size="15" fill="#6e7681">evict · preload · tune · fix-ctx</text>
+  </g>
+</svg>

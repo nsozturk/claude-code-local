@@ -6,3 +6,7 @@ __pycache__/
 # generated at runtime by sync-models.py (machine-specific paths)
 config/settings.json
 tmp/
+# Node & Astro Starlight
+node_modules/
+.astro/
+dist/
