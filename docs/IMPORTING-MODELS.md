@@ -20,6 +20,15 @@ ollama pull qwen2.5-coder:14b
 ccl            # it's already in /model
 ```
 
+## Search by keyword (don't know the exact name)
+
+```bash
+python3 scripts/search-hf.py qwen coder      # ranked GGUF repos (downloads, no token needed)
+python3 scripts/search-hf.py --repo <id>     # its quants, a recommended one, and the import command
+```
+
+Inside a ccl session: `/find-model qwen coder` runs the search → pick → import flow for you.
+
 ## 2. Hugging Face
 
 Modern Ollama can pull a GGUF straight from Hugging Face:

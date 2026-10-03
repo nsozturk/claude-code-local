@@ -22,5 +22,13 @@ echo "✓ $TARGET_DIR/cci -> $BIN_DIR/cci (legacy)"
 echo "✓ $TARGET_DIR/claude-isvalorum -> (legacy)"
 echo "✓ $TARGET_DIR/claude-ollama-bridge -> $BIN_DIR/claude-ollama-bridge"
 
+# Install the /find-model slash command into the isolated ccl profile
+PROFILE_CMDS="$HOME/.claude-isvalorum/commands"
+mkdir -p "$PROFILE_CMDS"
+if [ -f "$PROJECT_ROOT/commands/find-model.md" ]; then
+    ln -sf "$PROJECT_ROOT/commands/find-model.md" "$PROFILE_CMDS/find-model.md"
+    echo "✓ /find-model slash command installed"
+fi
+
 echo ""
 echo "✨ Symlinks installed. Run 'ccl' from any terminal (old 'cci' still works)."

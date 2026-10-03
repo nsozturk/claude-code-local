@@ -90,7 +90,16 @@ python3 scripts/import-model.py ~/.lmstudio/models/.../model.gguf   # import a l
 python3 scripts/import-model.py hf.co/TheUser/TheRepo-GGUF:Q4_K_M  # straight from Hugging Face
 ```
 
-Full guide: [docs/IMPORTING-MODELS.md](docs/IMPORTING-MODELS.md).
+Don't know the exact name? Search Hugging Face by keyword — ranked by downloads, with a
+recommended quant — and import from the results:
+
+```bash
+python3 scripts/search-hf.py qwen coder          # top GGUF repos for "qwen coder"
+python3 scripts/search-hf.py --repo <id>         # its quants + the ready import command
+```
+
+Inside a ccl session the `/find-model <keywords>` slash command drives the whole search → pick →
+import flow. Full guide: [docs/IMPORTING-MODELS.md](docs/IMPORTING-MODELS.md).
 
 ### Using the same models in opencode
 
