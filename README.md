@@ -108,6 +108,15 @@ import flow. Full guide: [docs/IMPORTING-MODELS.md](docs/IMPORTING-MODELS.md).
 python3 scripts/sync-opencode.py        # mirror every Ollama model into ~/.config/opencode/opencode.json
 ```
 
+### Make the server settings persistent (optional)
+
+`ccl --tune`'s SERVER settings (Flash Attention, KV-cache type, …) are set via `launchctl` and do
+**not** survive a reboot. To re-apply them automatically at every login:
+
+```bash
+bash scripts/install-ollama-env-agent.sh    # installs a LaunchAgent that runs apply-ollama-env.py at login
+```
+
 ## How it works
 
 Claude Code talks to a small zero-dependency Python bridge (`bin/claude-ollama-bridge`, port 11435)
