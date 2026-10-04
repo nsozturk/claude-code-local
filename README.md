@@ -131,6 +131,44 @@ The picker is populated via Claude Code's `modelPicker.replaceBuiltInOptions` in
 file. Details, and the measurements behind the design decisions, are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Driving `ccl` from a script (tmux)
+
+To drive `ccl` programmatically — from an outer agent, a test, or a wrapper — run it
+inside a persistent **tmux** session and interact with the live TUI, instead of firing
+one-shot `ccl -p "..."` commands. One-shot headless mode hides bugs that only surface
+interactively (a model that never loads, a retry/timeout hang, the bridge going down),
+and a tmux session survives across calls.
+
+```bash
+tmux ls                                  # existing session? (e.g. "ccl")
+tmux new-session -d -s ccl ; tmux send-keys -t ccl 'ccl' Enter
+
+# type text, THEN send Enter SEPARATELY so slash-commands / multi-line register
+tmux send-keys -t ccl -- "your prompt here"
+tmux send-keys -t ccl Enter
+
+# read the live screen (add -S -120 for scrollback)
+tmux capture-pane -t ccl -p
+```
+
+The last line of the pane is the status line — your health gauge: `✓ <model> …` when
+ready, `⏳ loading <model> …` while loading, and `🦙 <model> · bridge not responding`
+when the bridge is down. Gotchas: send `Enter` as its own `send-keys`; prefix
+`-`-leading text with `-- `; slash commands (`/model`, `/find-model`) and the picker
+work only in the live TUI, never in `-p` mode.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Status line: `bridge not responding` (but `curl :11434/api/version` answers) | The bridge (`:11435`) died while Ollama is still up | `ccl --bridge restart` (or `bash scripts/start-bridge.sh`), then re-check `curl -s :11435/health`. The resident model usually survives, so it returns instantly. |
+| Retries / long hang, model never loads | Bridge or model-load issue | Check `ollama ps` for what's resident and the memory-fit estimate (`python3 scripts/ollama_mem.py`); inspect the bridge log. Reproduce it in a live tmux session (above) rather than in `-p` mode. |
+| `/model` picker doesn't list local models | Picker options drifted | `ccl --doctor` (or `python3 scripts/sync-models.py`) to regenerate with `replaceBuiltInOptions: true`. |
+| Tune server settings lost after reboot | `launchctl` env is not persistent | `bash scripts/install-ollama-env-agent.sh` (see Usage). |
+
+Health checks: `curl -s http://127.0.0.1:11435/health` (bridge) and
+`curl -s http://127.0.0.1:11434/api/version` (Ollama).
+
 ## How it compares
 
 Honest version: the *translation* layer is a crowded space — there are several Anthropic↔Ollama
